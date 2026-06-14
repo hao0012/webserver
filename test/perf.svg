@@ -1,0 +1,1622 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="630" onload="init(evt)" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="630.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="613" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="613" > </text>
+<g id="frames">
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEPNS1_6bufferENS1_9timestampEEEC1ERKSA_ (10,101,010 samples, 1.04%)</title><rect x="784.4" y="357" width="12.3" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="787.38" y="367.5" ></text>
+</g>
+<g >
+<title>_ZSt25__uninitialized_default_nIPcmET_S1_T0_ (10,101,010 samples, 1.04%)</title><rect x="845.8" y="149" width="12.3" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="848.83" y="159.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E9_M_createIS6_EEvRSt9_Any_dataOT_St17integral_constantIbLb0EE (10,101,010 samples, 1.04%)</title><rect x="710.6" y="325" width="12.3" height="15.0" fill="rgb(234,137,32)" rx="2" ry="2" />
+<text  x="713.62" y="335.5" ></text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx13new_allocatorIN9webserver14tcp_connectionEE9constructIS2_JRNS1_9eventloopERiRNS1_12inet_addressES9_EEEvPT_DpOT0_ (90,909,090 samples, 9.38%)</title><rect x="809.0" y="245" width="110.6" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="811.96" y="255.5" >_ZN9__gnu_cxx..</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEEEC2ERKS7_ (10,101,010 samples, 1.04%)</title><rect x="612.3" y="325" width="12.3" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="615.29" y="335.5" ></text>
+</g>
+<g >
+<title>_ZNK9webserver6buffer14writable_bytesEv (10,101,010 samples, 1.04%)</title><rect x="108.3" y="277" width="12.3" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="111.33" y="287.5" ></text>
+</g>
+<g >
+<title>__GI___readv (10,101,010 samples, 1.04%)</title><rect x="157.5" y="293" width="12.3" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="160.50" y="303.5" ></text>
+</g>
+<g >
+<title>[libstdc++.so.6.0.30] (424,242,420 samples, 43.75%)</title><rect x="10.0" y="549" width="516.2" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="13.00" y="559.5" >[libstdc++.so.6.0.30]</text>
+</g>
+<g >
+<title>_ZNSt6atomicIbEaSEb (10,101,010 samples, 1.04%)</title><rect x="514.0" y="421" width="12.2" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="516.96" y="431.5" ></text>
+</g>
+<g >
+<title>_ZNSt16_Sp_counted_baseILN9__gnu_cxx12_Lock_policyE2EE23_M_add_ref_lock_nothrowEv (10,101,010 samples, 1.04%)</title><rect x="83.8" y="197" width="12.2" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="86.75" y="207.5" ></text>
+</g>
+<g >
+<title>_ZNKSt6vectorIcSaIcEE4sizeEv (10,101,010 samples, 1.04%)</title><rect x="108.3" y="261" width="12.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="111.33" y="271.5" ></text>
+</g>
+<g >
+<title>_ZNK9webserver6buffer14readable_bytesEv (10,101,010 samples, 1.04%)</title><rect x="132.9" y="181" width="12.3" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="135.92" y="191.5" ></text>
+</g>
+<g >
+<title>_ZNSt16allocator_traitsISaIPN9webserver7channelEEE10deallocateERS3_PS2_m (10,101,010 samples, 1.04%)</title><rect x="378.8" y="357" width="12.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="381.75" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_baseD1Ev (10,101,010 samples, 1.04%)</title><rect x="120.6" y="181" width="12.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="123.62" y="191.5" ></text>
+</g>
+<g >
+<title>_ZZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEENKUlRKSt10shared_ptrINS0_14tcp_connectionEEPNS0_6bufferENS0_9timestampEE0_clESG_SI_SJ_ (30,303,030 samples, 3.12%)</title><rect x="120.6" y="229" width="36.9" height="15.0" fill="rgb(241,167,40)" rx="2" ry="2" />
+<text  x="123.62" y="239.5" >_ZZ..</text>
+</g>
+<g >
+<title>_ZNSt8__detail16_Hashtable_allocISaINS_10_Hash_nodeISt4pairIKiPN9webserver7channelEELb0EEEEE16_M_allocate_nodeIJRKSt21piecewise_construct_tSt5tupleIJOiEESF_IJEEEEEPS8_DpOT_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="213" width="12.3" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="406.33" y="223.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver6bufferD1Ev (10,101,010 samples, 1.04%)</title><rect x="329.6" y="277" width="12.3" height="15.0" fill="rgb(251,211,50)" rx="2" ry="2" />
+<text  x="332.58" y="287.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEED2Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="325" width="12.3" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="492.38" y="335.5" ></text>
+</g>
+<g >
+<title>_ZZN9webserver9eventloop14add_connectionESt10shared_ptrINS_14tcp_connectionEEENKUlvE_clEv (50,505,050 samples, 5.21%)</title><rect x="391.0" y="341" width="61.5" height="15.0" fill="rgb(242,172,41)" rx="2" ry="2" />
+<text  x="394.04" y="351.5" >_ZZN9w..</text>
+</g>
+<g >
+<title>all (969,696,960 samples, 100%)</title><rect x="10.0" y="581" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="591.5" ></text>
+</g>
+<g >
+<title>_ZNSt16allocator_traitsISaINSt8__detail10_Hash_nodeISt4pairIKiPN9webserver7channelEELb0EEEEE9constructIS7_JRKSt21piecewise_construct_tSt5tupleIJOiEESF_IJEEEEEvRS9_PT_DpOT0_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="197" width="12.3" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="406.33" y="207.5" ></text>
+</g>
+<g >
+<title>_ZNSt16_Sp_counted_baseILN9__gnu_cxx12_Lock_policyE2EE23_M_add_ref_lock_nothrowEv (10,101,010 samples, 1.04%)</title><rect x="317.3" y="341" width="12.3" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="320.29" y="351.5" ></text>
+</g>
+<g >
+<title>__vdso_gettimeofday (10,101,010 samples, 1.04%)</title><rect x="956.5" y="437" width="12.3" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="959.46" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE12_M_constructIPKcEEvT_S8_St20forward_iterator_tag (10,101,010 samples, 1.04%)</title><rect x="747.5" y="341" width="12.3" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="750.50" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt6vectorISt8functionIFvvEESaIS2_EED2Ev (20,202,020 samples, 2.08%)</title><rect x="1030.2" y="453" width="24.6" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="1033.21" y="463.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection4sendERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE (10,101,010 samples, 1.04%)</title><rect x="120.6" y="213" width="12.3" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="123.62" y="223.5" ></text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIvEC1ERKSt8weak_ptrIvESt9nothrow_t (10,101,010 samples, 1.04%)</title><rect x="317.3" y="389" width="12.3" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="320.29" y="399.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS2_14tcp_connectionEEPNS2_6bufferENS2_9timestampEE0_E14_M_get_pointerERKSt9_Any_data (10,101,010 samples, 1.04%)</title><rect x="784.4" y="309" width="12.3" height="15.0" fill="rgb(205,3,0)" rx="2" ry="2" />
+<text  x="787.38" y="319.5" ></text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexE6unlockEv (20,202,020 samples, 2.08%)</title><rect x="686.0" y="293" width="24.6" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="689.04" y="303.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt23enable_shared_from_thisIN9webserver14tcp_connectionEE16shared_from_thisEv (10,101,010 samples, 1.04%)</title><rect x="83.8" y="261" width="12.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="86.75" y="271.5" ></text>
+</g>
+<g >
+<title>_ZnwmPv (10,101,010 samples, 1.04%)</title><rect x="612.3" y="245" width="12.3" height="15.0" fill="rgb(205,4,1)" rx="2" ry="2" />
+<text  x="615.29" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE5eraseERS1_ (20,202,020 samples, 2.08%)</title><rect x="59.2" y="133" width="24.6" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="62.17" y="143.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIN9webserver14tcp_connectionELN9__gnu_cxx12_Lock_policyE2EED1Ev (10,101,010 samples, 1.04%)</title><rect x="735.2" y="245" width="12.3" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="738.21" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNKSt8functionIFvvEEclEv (40,404,040 samples, 4.17%)</title><rect x="34.6" y="245" width="49.2" height="15.0" fill="rgb(227,104,25)" rx="2" ry="2" />
+<text  x="37.58" y="255.5" >_ZNK..</text>
+</g>
+<g >
+<title>_ZNSt6vectorISt8functionIFvvEESaIS2_EE4swapERS4_ (10,101,010 samples, 1.04%)</title><rect x="1017.9" y="453" width="12.3" height="15.0" fill="rgb(236,146,35)" rx="2" ry="2" />
+<text  x="1020.92" y="463.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@@GLIBC_2.2.5 (10,101,010 samples, 1.04%)</title><rect x="464.8" y="357" width="12.3" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="467.79" y="367.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection12handle_closeEv (60,606,060 samples, 6.25%)</title><rect x="34.6" y="293" width="73.7" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="37.58" y="303.5" >_ZN9webs..</text>
+</g>
+<g >
+<title>_ZNSt6vectorIcSaIcEED1Ev (10,101,010 samples, 1.04%)</title><rect x="329.6" y="261" width="12.3" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="332.58" y="271.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop21run_pending_callbacksEv (101,010,100 samples, 10.42%)</title><rect x="391.0" y="421" width="123.0" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="394.04" y="431.5" >_ZN9webserver9e..</text>
+</g>
+<g >
+<title>_int_malloc (20,202,020 samples, 2.08%)</title><rect x="1091.7" y="549" width="24.5" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="1094.67" y="559.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseIcSaIcEE12_Vector_implD2Ev (10,101,010 samples, 1.04%)</title><rect x="329.6" y="245" width="12.3" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="332.58" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIN9webserver14tcp_connectionEEC1EOS2_ (10,101,010 samples, 1.04%)</title><rect x="587.7" y="373" width="12.3" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="590.71" y="383.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (10,101,010 samples, 1.04%)</title><rect x="1165.4" y="549" width="12.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="1168.42" y="559.5" ></text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseIcSaIcEE17_M_create_storageEm (10,101,010 samples, 1.04%)</title><rect x="821.2" y="165" width="12.3" height="15.0" fill="rgb(223,83,20)" rx="2" ry="2" />
+<text  x="824.25" y="175.5" ></text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx17__normal_iteratorIPKSt10unique_ptrIN9webserver16eventloop_threadESt14default_deleteIS3_EESt6vectorIS6_SaIS6_EEEC2ERKS8_ (10,101,010 samples, 1.04%)</title><rect x="661.5" y="309" width="12.3" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="664.46" y="319.5" ></text>
+</g>
+<g >
+<title>_ZNSt14__shared_countILN9__gnu_cxx12_Lock_policyE2EED2Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="197" width="12.3" height="15.0" fill="rgb(215,50,12)" rx="2" ry="2" />
+<text  x="492.38" y="207.5" ></text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseIcSaIcEEC1EmRKS0_ (10,101,010 samples, 1.04%)</title><rect x="821.2" y="181" width="12.3" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="824.25" y="191.5" ></text>
+</g>
+<g >
+<title>_ZNSt16allocator_traitsISaIN9webserver14tcp_connectionEEE9constructIS1_JRNS0_9eventloopERiRNS0_12inet_addressES9_EEEvRS2_PT_DpOT0_ (90,909,090 samples, 9.38%)</title><rect x="809.0" y="261" width="110.6" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="811.96" y="271.5" >_ZNSt16alloca..</text>
+</g>
+<g >
+<title>_ZNKSt8functionIFvvEEclEv (50,505,050 samples, 5.21%)</title><rect x="391.0" y="405" width="61.5" height="15.0" fill="rgb(227,104,25)" rx="2" ry="2" />
+<text  x="394.04" y="415.5" >_ZNKSt..</text>
+</g>
+<g >
+<title>_ZNSt10_HashtableIiSt4pairIKiPN9webserver7channelEESaIS5_ENSt8__detail10_Select1stESt8equal_toIiESt4hashIiENS7_18_Mod_range_hashingENS7_20_Default_ranged_hashENS7_20_Prime_rehash_policyENS7_17_Hashtable_traitsILb0ELb0ELb1EEEE8_M_eraseESt17integral_constantIbLb1EERS1_ (10,101,010 samples, 1.04%)</title><rect x="46.9" y="85" width="12.3" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="49.88" y="95.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_managerERSt9_Any_dataRKS8_St18_Manager_operation (20,202,020 samples, 2.08%)</title><rect x="722.9" y="293" width="24.6" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="725.92" y="303.5" >_..</text>
+</g>
+<g >
+<title>_ZStanSt12memory_orderSt23__memory_order_modifier (10,101,010 samples, 1.04%)</title><rect x="1005.6" y="437" width="12.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="1008.62" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNKSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE15_M_bucket_indexEm (10,101,010 samples, 1.04%)</title><rect x="59.2" y="101" width="12.3" height="15.0" fill="rgb(208,15,3)" rx="2" ry="2" />
+<text  x="62.17" y="111.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel6updateEv (20,202,020 samples, 2.08%)</title><rect x="391.0" y="293" width="24.6" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="394.04" y="303.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEEZN11echo_serverC4ERKNS1_12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlS5_E_E10_M_managerERSt9_Any_dataRKSL_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="612.3" y="309" width="12.3" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="615.29" y="319.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7epoller14update_channelERNS_7channelE (20,202,020 samples, 2.08%)</title><rect x="391.0" y="277" width="24.6" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="394.04" y="287.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIN9webserver14tcp_connectionELN9__gnu_cxx12_Lock_policyE2EED1Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="213" width="12.3" height="15.0" fill="rgb(239,160,38)" rx="2" ry="2" />
+<text  x="492.38" y="223.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7epoller4pollEiRSt6vectorIPNS_7channelESaIS3_EE (20,202,020 samples, 2.08%)</title><rect x="366.5" y="421" width="24.5" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="369.46" y="431.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE7emplaceIJRS1_KS5_EEES0_INS8_14_Node_iteratorIS6_Lb0ELb0EEEbEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="440.2" y="309" width="12.3" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="443.21" y="319.5" ></text>
+</g>
+<g >
+<title>_ZSt13__invoke_implIvRZN9webserver14tcp_connectionC4ERNS0_9eventloopEiRKNS0_12inet_addressES6_EUlNS0_9timestampEE_JS7_EET_St14__invoke_otherOT0_DpOT1_ (232,323,230 samples, 23.96%)</title><rect x="22.3" y="341" width="282.7" height="15.0" fill="rgb(248,200,48)" rx="2" ry="2" />
+<text  x="25.29" y="351.5" >_ZSt13__invoke_implIvRZN9webserver14t..</text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop11run_in_loopESt8functionIFvvEE (30,303,030 samples, 3.12%)</title><rect x="673.8" y="341" width="36.8" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="676.75" y="351.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexE4lockEv (10,101,010 samples, 1.04%)</title><rect x="452.5" y="389" width="12.3" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="455.50" y="399.5" ></text>
+</g>
+<g >
+<title>_ZNK9webserver6buffer5beginEv (10,101,010 samples, 1.04%)</title><rect x="145.2" y="165" width="12.3" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="148.21" y="175.5" ></text>
+</g>
+<g >
+<title>__GI___setsockopt (10,101,010 samples, 1.04%)</title><rect x="907.3" y="213" width="12.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="910.29" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@@GLIBC_2.2.5 (20,202,020 samples, 2.08%)</title><rect x="686.0" y="261" width="24.6" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="689.04" y="271.5" >p..</text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexEC1ERS0_ (10,101,010 samples, 1.04%)</title><rect x="981.0" y="453" width="12.3" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="984.04" y="463.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvvEZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E9_M_invokeERKSt9_Any_data (50,505,050 samples, 5.21%)</title><rect x="391.0" y="389" width="61.5" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="394.04" y="399.5" >_ZNSt1..</text>
+</g>
+<g >
+<title>_ZNSt14__shared_countILN9__gnu_cxx12_Lock_policyE2EEC1ERKSt12__weak_countILS1_2EE (10,101,010 samples, 1.04%)</title><rect x="427.9" y="261" width="12.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="430.92" y="271.5" ></text>
+</g>
+<g >
+<title>_ZNSt17basic_string_viewIcSt11char_traitsIcEEC2EPKc (10,101,010 samples, 1.04%)</title><rect x="96.0" y="213" width="12.3" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="99.04" y="223.5" ></text>
+</g>
+<g >
+<title>_ZNSt16allocator_traitsISaISt23_Sp_counted_ptr_inplaceIN9webserver14tcp_connectionESaIS2_ELN9__gnu_cxx12_Lock_policyE2EEEE8allocateERS7_m (10,101,010 samples, 1.04%)</title><rect x="796.7" y="277" width="12.3" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="799.67" y="287.5" ></text>
+</g>
+<g >
+<title>_ZZN9webserver9eventloop14add_connectionESt10shared_ptrINS_14tcp_connectionEEENUlvE_D2Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="245" width="12.3" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="492.38" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt16_Sp_counted_baseILN9__gnu_cxx12_Lock_policyE2EE10_M_releaseEv (30,303,030 samples, 3.12%)</title><rect x="329.6" y="357" width="36.9" height="15.0" fill="rgb(216,50,12)" rx="2" ry="2" />
+<text  x="332.58" y="367.5" >_ZN..</text>
+</g>
+<g >
+<title>epoll_wait (20,202,020 samples, 2.08%)</title><rect x="1067.1" y="469" width="24.6" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="1070.08" y="479.5" >e..</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEED2Ev (10,101,010 samples, 1.04%)</title><rect x="501.7" y="405" width="12.3" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="504.67" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvvEZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_managerERSt9_Any_dataRKS8_St18_Manager_operation (20,202,020 samples, 2.08%)</title><rect x="722.9" y="309" width="24.6" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="725.92" y="319.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop4loopEv (424,242,420 samples, 43.75%)</title><rect x="10.0" y="437" width="516.2" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="13.00" y="447.5" >_ZN9webserver9eventloop4loopEv</text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop13queue_in_loopESt8functionIFvvEE (30,303,030 samples, 3.12%)</title><rect x="673.8" y="325" width="36.8" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="676.75" y="335.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexED2Ev (20,202,020 samples, 2.08%)</title><rect x="686.0" y="309" width="24.6" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="689.04" y="319.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt8__detail9_Map_baseIiSt4pairIKiPN9webserver7channelEESaIS6_ENS_10_Select1stESt8equal_toIiESt4hashIiENS_18_Mod_range_hashingENS_20_Default_ranged_hashENS_20_Prime_rehash_policyENS_17_Hashtable_traitsILb0ELb0ELb1EEELb1EEixEOi (10,101,010 samples, 1.04%)</title><rect x="403.3" y="245" width="12.3" height="15.0" fill="rgb(244,181,43)" rx="2" ry="2" />
+<text  x="406.33" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexE4lockEv (10,101,010 samples, 1.04%)</title><rect x="981.0" y="437" width="12.3" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="984.04" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNKSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEPNS1_6bufferENS1_9timestampEEEclES5_S7_S8_ (30,303,030 samples, 3.12%)</title><rect x="120.6" y="293" width="36.9" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="123.62" y="303.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx13new_allocatorIN9webserver14tcp_connectionEE7destroyIS2_EEvPT_ (30,303,030 samples, 3.12%)</title><rect x="329.6" y="309" width="36.9" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="332.58" y="319.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZN9webserver6logger5debugIJRKiEEEvSt17basic_string_viewIcSt11char_traitsIcEEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="575.4" y="437" width="12.3" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="578.42" y="447.5" ></text>
+</g>
+<g >
+<title>[unknown] (20,202,020 samples, 2.08%)</title><rect x="526.2" y="549" width="24.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="529.25" y="559.5" >[..</text>
+</g>
+<g >
+<title>_ZSt10__invoke_rIvRZN9webserver14tcp_connection25connection_close_callbackEvEUlvE_JEENSt9enable_ifIX16is_invocable_r_vIT_T0_DpT1_EES5_E4typeEOS6_DpOS7_ (30,303,030 samples, 3.12%)</title><rect x="46.9" y="213" width="36.9" height="15.0" fill="rgb(248,197,47)" rx="2" ry="2" />
+<text  x="49.88" y="223.5" >_ZS..</text>
+</g>
+<g >
+<title>_ZN9webserver6buffer7read_fdEiPi (10,101,010 samples, 1.04%)</title><rect x="108.3" y="293" width="12.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="111.33" y="303.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection27set_write_complete_callbackESt8functionIFvRKSt10shared_ptrIS0_EEE (10,101,010 samples, 1.04%)</title><rect x="636.9" y="357" width="12.3" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="639.88" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIvED1Ev (30,303,030 samples, 3.12%)</title><rect x="329.6" y="405" width="36.9" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="332.58" y="415.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNKSt10_HashtableIiSt4pairIKiPN9webserver7channelEESaIS5_ENSt8__detail10_Select1stESt8equal_toIiESt4hashIiENS7_18_Mod_range_hashingENS7_20_Default_ranged_hashENS7_20_Prime_rehash_policyENS7_17_Hashtable_traitsILb0ELb0ELb1EEEE19_M_find_before_nodeEmRS1_m (10,101,010 samples, 1.04%)</title><rect x="46.9" y="69" width="12.3" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="49.88" y="79.5" ></text>
+</g>
+<g >
+<title>_ZSt12__get_helperILm0EOiJEERT0_RSt11_Tuple_implIXT_EJS1_DpT1_EE (10,101,010 samples, 1.04%)</title><rect x="403.3" y="117" width="12.3" height="15.0" fill="rgb(209,19,4)" rx="2" ry="2" />
+<text  x="406.33" y="127.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel18set_close_callbackESt8functionIFvvEE (30,303,030 samples, 3.12%)</title><rect x="858.1" y="213" width="36.9" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="861.12" y="223.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZN9webserver21eventloop_thread_pool18get_next_eventloopEv (20,202,020 samples, 2.08%)</title><rect x="649.2" y="357" width="24.6" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="652.17" y="367.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop21run_pending_callbacksEv (60,606,060 samples, 6.25%)</title><rect x="981.0" y="469" width="73.8" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="984.04" y="479.5" >_ZN9webs..</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (10,101,010 samples, 1.04%)</title><rect x="378.8" y="341" width="12.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="381.75" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIvLN9__gnu_cxx12_Lock_policyE2EEC1IN9webserver14tcp_connectionEvEERKS_IT_LS1_2EE (10,101,010 samples, 1.04%)</title><rect x="415.6" y="293" width="12.3" height="15.0" fill="rgb(253,220,52)" rx="2" ry="2" />
+<text  x="418.62" y="303.5" ></text>
+</g>
+<g >
+<title>_ZNSt16_Sp_counted_baseILN9__gnu_cxx12_Lock_policyE2EE23_M_add_ref_lock_nothrowEv (10,101,010 samples, 1.04%)</title><rect x="427.9" y="245" width="12.3" height="15.0" fill="rgb(227,102,24)" rx="2" ry="2" />
+<text  x="430.92" y="255.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel12handle_eventENS_9timestampE (303,030,300 samples, 31.25%)</title><rect x="563.1" y="469" width="368.8" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="566.12" y="479.5" >_ZN9webserver7channel12handle_eventENS_9timestampE</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEPNS1_6bufferENS1_9timestampEEEC1Ev (10,101,010 samples, 1.04%)</title><rect x="895.0" y="213" width="12.3" height="15.0" fill="rgb(219,64,15)" rx="2" ry="2" />
+<text  x="898.00" y="223.5" ></text>
+</g>
+<g >
+<title>_ZNSt8weak_ptrIvED2Ev (10,101,010 samples, 1.04%)</title><rect x="341.9" y="261" width="12.3" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="344.88" y="271.5" ></text>
+</g>
+<g >
+<title>_ZSt10__invoke_rIvRZN9webserver8acceptor6listenEmEUlNS0_9timestampEE_JS2_EENSt9enable_ifIX16is_invocable_r_vIT_T0_DpT1_EES6_E4typeEOS7_DpOS8_ (282,828,280 samples, 29.17%)</title><rect x="587.7" y="405" width="344.2" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="590.71" y="415.5" >_ZSt10__invoke_rIvRZN9webserver8acceptor6liste..</text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIvLN9__gnu_cxx12_Lock_policyE2EED1Ev (30,303,030 samples, 3.12%)</title><rect x="329.6" y="389" width="36.9" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="332.58" y="399.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt6vectorISt8functionIFvvEESaIS2_EED2Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="405" width="12.3" height="15.0" fill="rgb(225,94,22)" rx="2" ry="2" />
+<text  x="492.38" y="415.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop14add_connectionESt10shared_ptrINS_14tcp_connectionEE (60,606,060 samples, 6.25%)</title><rect x="673.8" y="357" width="73.7" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="676.75" y="367.5" >_ZN9webs..</text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvvEZN9webserver14tcp_connection25connection_close_callbackEvEUlvE_E9_M_invokeERKSt9_Any_data (30,303,030 samples, 3.12%)</title><rect x="46.9" y="229" width="36.9" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="49.88" y="239.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEEC1EOS1_ (20,202,020 samples, 2.08%)</title><rect x="870.4" y="181" width="24.6" height="15.0" fill="rgb(235,141,33)" rx="2" ry="2" />
+<text  x="873.42" y="191.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt6vectorIcSaIcEE17_S_check_init_lenEmRKS0_ (10,101,010 samples, 1.04%)</title><rect x="833.5" y="181" width="12.3" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="836.54" y="191.5" ></text>
+</g>
+<g >
+<title>_ZSt8__invokeIZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_JEENSt15__invoke_resultIT_JDpT0_EE4typeEOSF_DpOSG_ (424,242,420 samples, 43.75%)</title><rect x="10.0" y="485" width="516.2" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="13.00" y="495.5" >_ZSt8__invokeIZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7..</text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIvLN9__gnu_cxx12_Lock_policyE2EEC1ERKSt10__weak_ptrIvLS1_2EESt9nothrow_t (10,101,010 samples, 1.04%)</title><rect x="317.3" y="373" width="12.3" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="320.29" y="383.5" ></text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexE6unlockEv (10,101,010 samples, 1.04%)</title><rect x="464.8" y="389" width="12.3" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="467.79" y="399.5" ></text>
+</g>
+<g >
+<title>_ZZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEENKUlvE_clEv (424,242,420 samples, 43.75%)</title><rect x="10.0" y="453" width="516.2" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="13.00" y="463.5" >_ZZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112bas..</text>
+</g>
+<g >
+<title>_ZSt8_DestroyISt8functionIFvvEEEvPT_ (10,101,010 samples, 1.04%)</title><rect x="489.4" y="341" width="12.3" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="492.38" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIN9webserver14tcp_connectionELN9__gnu_cxx12_Lock_policyE2EEC1IS1_vEERKSt10__weak_ptrIT_LS3_2EE (10,101,010 samples, 1.04%)</title><rect x="427.9" y="277" width="12.3" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="430.92" y="287.5" ></text>
+</g>
+<g >
+<title>_ZNKSt8functionIFvvEEcvbEv (10,101,010 samples, 1.04%)</title><rect x="882.7" y="165" width="12.3" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="885.71" y="175.5" ></text>
+</g>
+<g >
+<title>_ZSt15allocate_sharedIN9webserver14tcp_connectionESaIS1_EJRNS0_9eventloopERiRNS0_12inet_addressES7_EESt10shared_ptrIT_ERKT0_DpOT1_ (101,010,100 samples, 10.42%)</title><rect x="796.7" y="341" width="122.9" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="799.67" y="351.5" >_ZSt15allocate_..</text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIN9webserver14tcp_connectionEEC2IS1_vEERKSt8weak_ptrIT_E (10,101,010 samples, 1.04%)</title><rect x="83.8" y="245" width="12.2" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="86.75" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt6atomicIbEaSEb (20,202,020 samples, 2.08%)</title><rect x="993.3" y="453" width="24.6" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="996.33" y="463.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEPNS1_6bufferENS1_9timestampEEZN11echo_serverC4ERKNS1_12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlS5_S7_S8_E0_E10_M_managerERSt9_Any_dataRKSO_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="784.4" y="341" width="12.3" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="787.38" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_baseD1Ev (10,101,010 samples, 1.04%)</title><rect x="501.7" y="389" width="12.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="504.67" y="399.5" ></text>
+</g>
+<g >
+<title>_ZN11echo_server5startEv (444,444,440 samples, 45.83%)</title><rect x="550.8" y="517" width="540.9" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="553.83" y="527.5" >_ZN11echo_server5startEv</text>
+</g>
+<g >
+<title>_ZN9webserver7epoller14update_channelERNS_7channelE (10,101,010 samples, 1.04%)</title><rect x="96.0" y="245" width="12.3" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="99.04" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNKSt6vectorISt10unique_ptrIN9webserver16eventloop_threadESt14default_deleteIS2_EESaIS5_EE3endEv (10,101,010 samples, 1.04%)</title><rect x="661.5" y="325" width="12.3" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="664.46" y="335.5" ></text>
+</g>
+<g >
+<title>_ZNSt8__detail16_Hashtable_allocISaINS_10_Hash_nodeISt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEELb0EEEEE16_M_allocate_nodeIJRS3_KS7_EEEPS9_DpOT_ (10,101,010 samples, 1.04%)</title><rect x="440.2" y="261" width="12.3" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="443.21" y="271.5" ></text>
+</g>
+<g >
+<title>_ZSt27__uninitialized_default_n_aIPcmcET_S1_T0_RSaIT1_E (10,101,010 samples, 1.04%)</title><rect x="845.8" y="165" width="12.3" height="15.0" fill="rgb(222,82,19)" rx="2" ry="2" />
+<text  x="848.83" y="175.5" ></text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIN9webserver14tcp_connectionELN9__gnu_cxx12_Lock_policyE2EEC1IS1_vEERKSt10__weak_ptrIT_LS3_2EE (10,101,010 samples, 1.04%)</title><rect x="83.8" y="229" width="12.2" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="86.75" y="239.5" ></text>
+</g>
+<g >
+<title>__libc_start_call_main (444,444,440 samples, 45.83%)</title><rect x="550.8" y="549" width="540.9" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="553.83" y="559.5" >__libc_start_call_main</text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseIPN9webserver7channelESaIS2_EED1Ev (10,101,010 samples, 1.04%)</title><rect x="1054.8" y="453" width="12.3" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="1057.79" y="463.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_managerERSt9_Any_dataRKS8_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="489.4" y="277" width="12.3" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="492.38" y="287.5" ></text>
+</g>
+<g >
+<title>_ZNSt5mutex6unlockEv (10,101,010 samples, 1.04%)</title><rect x="464.8" y="373" width="12.3" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="467.79" y="383.5" ></text>
+</g>
+<g >
+<title>malloc (40,404,040 samples, 4.17%)</title><rect x="1116.2" y="549" width="49.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1119.25" y="559.5" >malloc</text>
+</g>
+<g >
+<title>_ZNSt6thread8_InvokerISt5tupleIJZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_EEEclEv (424,242,420 samples, 43.75%)</title><rect x="10.0" y="517" width="516.2" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="13.00" y="527.5" >_ZNSt6thread8_InvokerISt5tupleIJZN9webserver16eventloop_threadC4ESt8fu..</text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvN9webserver9timestampEEZNS0_14tcp_connectionC4ERNS0_9eventloopEiRKNS0_12inet_addressES8_EUlS1_E_E9_M_invokeERKSt9_Any_dataOS1_ (10,101,010 samples, 1.04%)</title><rect x="305.0" y="389" width="12.3" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="308.00" y="399.5" ></text>
+</g>
+<g >
+<title>_ZNSt23enable_shared_from_thisIN9webserver14tcp_connectionEE16shared_from_thisEv (10,101,010 samples, 1.04%)</title><rect x="427.9" y="309" width="12.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="430.92" y="319.5" ></text>
+</g>
+<g >
+<title>_ZNSt6vectorIPN9webserver7channelESaIS2_EE17_M_realloc_insertIJRKS2_EEEvN9__gnu_cxx17__normal_iteratorIPS2_S4_EEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="378.8" y="389" width="12.2" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="381.75" y="399.5" ></text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseIPN9webserver7channelESaIS2_EE13_M_deallocateEPS2_m (10,101,010 samples, 1.04%)</title><rect x="378.8" y="373" width="12.2" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="381.75" y="383.5" ></text>
+</g>
+<g >
+<title>_ZL18__gthread_active_pv (10,101,010 samples, 1.04%)</title><rect x="981.0" y="405" width="12.3" height="15.0" fill="rgb(252,217,51)" rx="2" ry="2" />
+<text  x="984.04" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE12_Scoped_nodeC1IJRS1_KS5_EEEPNS8_16_Hashtable_allocISaINS8_10_Hash_nodeIS6_Lb0EEEEEEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="440.2" y="277" width="12.3" height="15.0" fill="rgb(222,79,18)" rx="2" ry="2" />
+<text  x="443.21" y="287.5" ></text>
+</g>
+<g >
+<title>_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEED2Ev (10,101,010 samples, 1.04%)</title><rect x="120.6" y="117" width="12.3" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="123.62" y="127.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEEEaSERKS7_ (10,101,010 samples, 1.04%)</title><rect x="612.3" y="341" width="12.3" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="615.29" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt13unordered_mapIiPN9webserver7channelESt4hashIiESt8equal_toIiESaISt4pairIKiS2_EEE5eraseERS8_ (10,101,010 samples, 1.04%)</title><rect x="46.9" y="117" width="12.3" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="49.88" y="127.5" ></text>
+</g>
+<g >
+<title>_ZNKSt6atomicIbEcvbEv (10,101,010 samples, 1.04%)</title><rect x="673.8" y="309" width="12.2" height="15.0" fill="rgb(237,149,35)" rx="2" ry="2" />
+<text  x="676.75" y="319.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEEC1IZN9webserver9eventloop14add_connectionESt10shared_ptrINS3_14tcp_connectionEEEUlvE_vEEOT_ (10,101,010 samples, 1.04%)</title><rect x="710.6" y="341" width="12.3" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="713.62" y="351.5" ></text>
+</g>
+<g >
+<title>echo_server (969,696,960 samples, 100.00%)</title><rect x="10.0" y="565" width="1180.0" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="13.00" y="575.5" >echo_server</text>
+</g>
+<g >
+<title>_ZNSt23_Sp_counted_ptr_inplaceIN9webserver14tcp_connectionESaIS1_ELN9__gnu_cxx12_Lock_policyE2EEC1IJRNS0_9eventloopERiRNS0_12inet_addressESB_EEES2_DpOT_ (90,909,090 samples, 9.38%)</title><rect x="809.0" y="277" width="110.6" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="811.96" y="287.5" >_ZNSt23_Sp_co..</text>
+</g>
+<g >
+<title>_ZNSt6vectorIcSaIcEE21_M_default_initializeEm (10,101,010 samples, 1.04%)</title><rect x="845.8" y="181" width="12.3" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="848.83" y="191.5" ></text>
+</g>
+<g >
+<title>_ZNKSt8__detail15_Hashtable_baseIiSt4pairIKiPN9webserver7channelEENS_10_Select1stESt8equal_toIiESt4hashIiENS_18_Mod_range_hashingENS_20_Default_ranged_hashENS_17_Hashtable_traitsILb0ELb0ELb1EEEE9_M_equalsERS2_mRKNS_16_Hash_node_valueIS6_Lb0EEE (10,101,010 samples, 1.04%)</title><rect x="46.9" y="53" width="12.3" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="49.88" y="63.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableIiSt4pairIKiPN9webserver7channelEESaIS5_ENSt8__detail10_Select1stESt8equal_toIiESt4hashIiENS7_18_Mod_range_hashingENS7_20_Default_ranged_hashENS7_20_Prime_rehash_policyENS7_17_Hashtable_traitsILb0ELb0ELb1EEEE12_Scoped_nodeC2IJRKSt21piecewise_construct_tSt5tupleIJOiEESO_IJEEEEEPNS7_16_Hashtable_allocISaINS7_10_Hash_nodeIS5_Lb0EEEEEEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="229" width="12.3" height="15.0" fill="rgb(211,30,7)" rx="2" ry="2" />
+<text  x="406.33" y="239.5" ></text>
+</g>
+<g >
+<title>_ZZN9webserver14tcp_connectionC4ERNS_9eventloopEiRKNS_12inet_addressES5_ENKUlNS_9timestampEE_clES6_ (232,323,230 samples, 23.96%)</title><rect x="22.3" y="325" width="282.7" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="25.29" y="335.5" >_ZZN9webserver14tcp_connectionC4ERNS_..</text>
+</g>
+<g >
+<title>_ZNSt4pairIKiPN9webserver7channelEEC1IJOiEJLm0EEJEJEEERSt5tupleIJDpT_EERS7_IJDpT1_EESt12_Index_tupleIJXspT0_EEESG_IJXspT2_EEE (10,101,010 samples, 1.04%)</title><rect x="403.3" y="149" width="12.3" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="406.33" y="159.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7epoller14update_channelEiRNS_7channelE (10,101,010 samples, 1.04%)</title><rect x="391.0" y="261" width="12.3" height="15.0" fill="rgb(229,114,27)" rx="2" ry="2" />
+<text  x="394.04" y="271.5" ></text>
+</g>
+<g >
+<title>_ZSt8_DestroyIPSt8functionIFvvEES2_EvT_S4_RSaIT0_E (10,101,010 samples, 1.04%)</title><rect x="489.4" y="389" width="12.3" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="492.38" y="399.5" ></text>
+</g>
+<g >
+<title>_ZSt13__invoke_implIvRZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS1_14tcp_connectionEEPNS1_6bufferENS1_9timestampEE0_JSH_SJ_SK_EET_St14__invoke_otherOT0_DpOT1_ (30,303,030 samples, 3.12%)</title><rect x="120.6" y="245" width="36.9" height="15.0" fill="rgb(206,4,1)" rx="2" ry="2" />
+<text  x="123.62" y="255.5" >_ZS..</text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connectionC2ERNS_9eventloopEiRKNS_12inet_addressES5_ (90,909,090 samples, 9.38%)</title><rect x="809.0" y="229" width="110.6" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="811.96" y="239.5" >_ZN9webserver..</text>
+</g>
+<g >
+<title>_ZN9webserver10tcp_server5startEv (444,444,440 samples, 45.83%)</title><rect x="550.8" y="501" width="540.9" height="15.0" fill="rgb(218,62,15)" rx="2" ry="2" />
+<text  x="553.83" y="511.5" >_ZN9webserver10tcp_server5startEv</text>
+</g>
+<g >
+<title>_ZNSt12__shared_ptrIN9webserver14tcp_connectionELN9__gnu_cxx12_Lock_policyE2EEC2ISaIS1_EJRNS0_9eventloopERiRNS0_12inet_addressESB_EEESt20_Sp_alloc_shared_tagIT_EDpOT0_ (101,010,100 samples, 10.42%)</title><rect x="796.7" y="309" width="122.9" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="799.67" y="319.5" >_ZNSt12__shared..</text>
+</g>
+<g >
+<title>_ZSt8_DestroyIPSt8functionIFvvEEEvT_S4_ (10,101,010 samples, 1.04%)</title><rect x="489.4" y="373" width="12.3" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="492.38" y="383.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE8_M_eraseESt17integral_constantIbLb1EERS1_ (20,202,020 samples, 2.08%)</title><rect x="59.2" y="117" width="24.6" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="62.17" y="127.5" >_..</text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (10,101,010 samples, 1.04%)</title><rect x="452.5" y="357" width="12.3" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="455.50" y="367.5" ></text>
+</g>
+<g >
+<title>_ZSt13__invoke_implIvRZN9webserver8acceptor6listenEmEUlNS0_9timestampEE_JS2_EET_St14__invoke_otherOT0_DpOT1_ (282,828,280 samples, 29.17%)</title><rect x="587.7" y="389" width="344.2" height="15.0" fill="rgb(250,209,50)" rx="2" ry="2" />
+<text  x="590.71" y="399.5" >_ZSt13__invoke_implIvRZN9webserver8acceptor6li..</text>
+</g>
+<g >
+<title>_ZSt10__invoke_rIvRZN9webserver9eventloop14add_connectionESt10shared_ptrINS0_14tcp_connectionEEEUlvE_JEENSt9enable_ifIX16is_invocable_r_vIT_T0_DpT1_EES8_E4typeEOS9_DpOSA_ (50,505,050 samples, 5.21%)</title><rect x="391.0" y="373" width="61.5" height="15.0" fill="rgb(227,104,25)" rx="2" ry="2" />
+<text  x="394.04" y="383.5" >_ZSt10..</text>
+</g>
+<g >
+<title>_ZNSt10_Head_baseILm0EOiLb0EE7_M_headERS1_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="85" width="12.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="406.33" y="95.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE8_M_eraseEmPNS8_15_Hash_node_baseEPNS8_10_Hash_nodeIS6_Lb0EEE (10,101,010 samples, 1.04%)</title><rect x="71.5" y="101" width="12.3" height="15.0" fill="rgb(251,211,50)" rx="2" ry="2" />
+<text  x="74.46" y="111.5" ></text>
+</g>
+<g >
+<title>_ZNSt6vectorIPN9webserver7channelESaIS2_EED1Ev (10,101,010 samples, 1.04%)</title><rect x="1054.8" y="469" width="12.3" height="15.0" fill="rgb(252,220,52)" rx="2" ry="2" />
+<text  x="1057.79" y="479.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver10event_util18has_readable_eventEi (10,101,010 samples, 1.04%)</title><rect x="563.1" y="437" width="12.3" height="15.0" fill="rgb(241,167,39)" rx="2" ry="2" />
+<text  x="566.12" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNSt12__weak_countILN9__gnu_cxx12_Lock_policyE2EED2Ev (10,101,010 samples, 1.04%)</title><rect x="341.9" y="229" width="12.3" height="15.0" fill="rgb(216,50,12)" rx="2" ry="2" />
+<text  x="344.88" y="239.5" ></text>
+</g>
+<g >
+<title>_ZNSt13unordered_mapImSt10shared_ptrIN9webserver14tcp_connectionEESt4hashImESt8equal_toImESaISt4pairIKmS3_EEE7emplaceIJRS9_KS3_EEES8_INSt8__detail14_Node_iteratorISA_Lb0ELb0EEEbEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="440.2" y="325" width="12.3" height="15.0" fill="rgb(226,100,23)" rx="2" ry="2" />
+<text  x="443.21" y="335.5" ></text>
+</g>
+<g >
+<title>__close (10,101,010 samples, 1.04%)</title><rect x="354.2" y="277" width="12.3" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="357.17" y="287.5" ></text>
+</g>
+<g >
+<title>_ZSt10__invoke_rIvRZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS1_14tcp_connectionEEPNS1_6bufferENS1_9timestampEE0_JSH_SJ_SK_EENSt9enable_ifIX16is_invocable_r_vIT_T0_DpT1_EESO_E4typeEOSP_DpOSQ_ (30,303,030 samples, 3.12%)</title><rect x="120.6" y="261" width="36.9" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="123.62" y="271.5" >_ZS..</text>
+</g>
+<g >
+<title>_ZZN9webserver14tcp_connection25connection_close_callbackEvENKUlvE_clEv (30,303,030 samples, 3.12%)</title><rect x="46.9" y="181" width="36.9" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="49.88" y="191.5" >_ZZ..</text>
+</g>
+<g >
+<title>_ZNSt13unordered_mapIiPN9webserver7channelESt4hashIiESt8equal_toIiESaISt4pairIKiS2_EEEixEOi (10,101,010 samples, 1.04%)</title><rect x="403.3" y="261" width="12.3" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="406.33" y="271.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEPNS1_6bufferENS1_9timestampEEZN11echo_serverC4ERKNS1_12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlS5_S7_S8_E0_E9_M_invokeERKSt9_Any_dataS5_OS7_OS8_ (30,303,030 samples, 3.12%)</title><rect x="120.6" y="277" width="36.9" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="123.62" y="287.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNKSt6vectorISt10unique_ptrIN9webserver16eventloop_threadESt14default_deleteIS2_EESaIS5_EE5emptyEv (10,101,010 samples, 1.04%)</title><rect x="661.5" y="341" width="12.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="664.46" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt27__uninitialized_default_n_1ILb1EE18__uninit_default_nIPcmEET_S3_T0_ (10,101,010 samples, 1.04%)</title><rect x="845.8" y="133" width="12.3" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="848.83" y="143.5" ></text>
+</g>
+<g >
+<title>_ZNSt13__atomic_baseIbEaSEb (10,101,010 samples, 1.04%)</title><rect x="477.1" y="389" width="12.3" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="480.08" y="399.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvvEZN9webserver14tcp_connection4sendERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_E10_M_managerERSt9_Any_dataRKSD_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="120.6" y="165" width="12.3" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="123.62" y="175.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_destroyERSt9_Any_dataSt17integral_constantIbLb0EE (10,101,010 samples, 1.04%)</title><rect x="735.2" y="277" width="12.3" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="738.21" y="287.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection20set_message_callbackESt8functionIFvRKSt10shared_ptrIS0_EPNS_6bufferENS_9timestampEEE (10,101,010 samples, 1.04%)</title><rect x="624.6" y="357" width="12.3" height="15.0" fill="rgb(209,21,5)" rx="2" ry="2" />
+<text  x="627.58" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt16allocator_traitsISaINSt8__detail10_Hash_nodeISt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEELb0EEEEE9constructIS8_JRS3_KS7_EEEvRSA_PT_DpOT0_ (10,101,010 samples, 1.04%)</title><rect x="440.2" y="245" width="12.3" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="443.21" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt6vectorIPN9webserver7channelESaIS2_EE9push_backERKS2_ (10,101,010 samples, 1.04%)</title><rect x="968.8" y="453" width="12.2" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="971.75" y="463.5" ></text>
+</g>
+<g >
+<title>_ZNSt14__shared_countILN9__gnu_cxx12_Lock_policyE2EEC2ERKSt12__weak_countILS1_2EESt9nothrow_t (10,101,010 samples, 1.04%)</title><rect x="317.3" y="357" width="12.3" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="320.29" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt5mutex4lockEv (10,101,010 samples, 1.04%)</title><rect x="981.0" y="421" width="12.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="984.04" y="431.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel23handle_event_with_guardENS_9timestampE (252,525,250 samples, 26.04%)</title><rect x="10.0" y="405" width="307.3" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >_ZN9webserver7channel23handle_event_with_..</text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection25connection_close_callbackEv (50,505,050 samples, 5.21%)</title><rect x="34.6" y="277" width="61.4" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="37.58" y="287.5" >_ZN9we..</text>
+</g>
+<g >
+<title>_ZN9webserver7channel6updateEv (10,101,010 samples, 1.04%)</title><rect x="96.0" y="261" width="12.3" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="99.04" y="271.5" ></text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseIPN9webserver7channelESaIS2_EE13_M_deallocateEPS2_m (10,101,010 samples, 1.04%)</title><rect x="1054.8" y="437" width="12.3" height="15.0" fill="rgb(234,136,32)" rx="2" ry="2" />
+<text  x="1057.79" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEEEC2ERKS7_ (10,101,010 samples, 1.04%)</title><rect x="636.9" y="341" width="12.3" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="639.88" y="351.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection20establish_connectionEv (40,404,040 samples, 4.17%)</title><rect x="391.0" y="325" width="49.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="394.04" y="335.5" >_ZN9..</text>
+</g>
+<g >
+<title>_ZNSt12_Destroy_auxILb0EE9__destroyIPSt8functionIFvvEEEEvT_S6_ (10,101,010 samples, 1.04%)</title><rect x="489.4" y="357" width="12.3" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="492.38" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvvEZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_managerERSt9_Any_dataRKS8_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="501.7" y="373" width="12.3" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="504.67" y="383.5" ></text>
+</g>
+<g >
+<title>_ZNSt14__shared_countILN9__gnu_cxx12_Lock_policyE2EED2Ev (30,303,030 samples, 3.12%)</title><rect x="329.6" y="373" width="36.9" height="15.0" fill="rgb(215,50,12)" rx="2" ry="2" />
+<text  x="332.58" y="383.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_EEEEE6_M_runEv (424,242,420 samples, 43.75%)</title><rect x="10.0" y="533" width="516.2" height="15.0" fill="rgb(231,122,29)" rx="2" ry="2" />
+<text  x="13.00" y="543.5" >_ZNSt6thread11_State_implINS_8_InvokerISt5tupleIJZN9webserver16eventlo..</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEED2Ev (20,202,020 samples, 2.08%)</title><rect x="722.9" y="341" width="24.6" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="725.92" y="351.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection11handle_readENS_9timestampE (232,323,230 samples, 23.96%)</title><rect x="22.3" y="309" width="282.7" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="25.29" y="319.5" >_ZN9webserver14tcp_connection11handle..</text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx17__is_null_pointerIKcEEbPT_ (10,101,010 samples, 1.04%)</title><rect x="747.5" y="325" width="12.3" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="750.50" y="335.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableImSt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEESaIS6_ENSt8__detail10_Select1stESt8equal_toImESt4hashImENS8_18_Mod_range_hashingENS8_20_Default_ranged_hashENS8_20_Prime_rehash_policyENS8_17_Hashtable_traitsILb0ELb0ELb1EEEE10_M_emplaceIJRS1_KS5_EEES0_INS8_14_Node_iteratorIS6_Lb0ELb0EEEbESt17integral_constantIbLb1EEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="440.2" y="293" width="12.3" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="443.21" y="303.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel11disable_allEv (10,101,010 samples, 1.04%)</title><rect x="96.0" y="277" width="12.3" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="99.04" y="287.5" ></text>
+</g>
+<g >
+<title>_ZNSt17basic_string_viewIcSt11char_traitsIcEEC2EPKc (10,101,010 samples, 1.04%)</title><rect x="366.5" y="405" width="12.3" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="369.46" y="415.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop4loopEv (434,343,430 samples, 44.79%)</title><rect x="563.1" y="485" width="528.6" height="15.0" fill="rgb(209,20,4)" rx="2" ry="2" />
+<text  x="566.12" y="495.5" >_ZN9webserver9eventloop4loopEv</text>
+</g>
+<g >
+<title>_ZSt3getILm0EJOiEERNSt13tuple_elementIXT_ESt5tupleIJDpT0_EEE4typeERS5_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="133" width="12.3" height="15.0" fill="rgb(253,224,53)" rx="2" ry="2" />
+<text  x="406.33" y="143.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection20set_connect_callbackESt8functionIFvRKSt10shared_ptrIS0_EEE (10,101,010 samples, 1.04%)</title><rect x="612.3" y="357" width="12.3" height="15.0" fill="rgb(236,144,34)" rx="2" ry="2" />
+<text  x="615.29" y="367.5" ></text>
+</g>
+<g >
+<title>[echo_server] (10,101,010 samples, 1.04%)</title><rect x="600.0" y="357" width="12.3" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="603.00" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt16allocator_traitsISaIN9webserver14tcp_connectionEEE7destroyIS1_EEvRS2_PT_ (30,303,030 samples, 3.12%)</title><rect x="329.6" y="325" width="36.9" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="332.58" y="335.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvN9webserver9timestampEEZNS0_14tcp_connectionC4ERNS0_9eventloopEiRKNS0_12inet_addressES8_EUlS1_E_E9_M_invokeERKSt9_Any_dataOS1_ (232,323,230 samples, 23.96%)</title><rect x="22.3" y="373" width="282.7" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="25.29" y="383.5" >_ZNSt17_Function_handlerIFvN9webserve..</text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx17__normal_iteratorIPKcSt6vectorIcSaIcEEEC1ERKS2_ (10,101,010 samples, 1.04%)</title><rect x="145.2" y="149" width="12.3" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="148.21" y="159.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7epoller4pollEiRSt6vectorIPNS_7channelESaIS3_EE (10,101,010 samples, 1.04%)</title><rect x="550.8" y="485" width="12.3" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="553.83" y="495.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_destroyERSt9_Any_dataSt17integral_constantIbLb0EE (10,101,010 samples, 1.04%)</title><rect x="501.7" y="341" width="12.3" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="504.67" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_managerERSt9_Any_dataRKS8_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="501.7" y="357" width="12.3" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="504.67" y="367.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEPNS1_6bufferENS1_9timestampEEEaSERKSA_ (10,101,010 samples, 1.04%)</title><rect x="624.6" y="341" width="12.3" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="627.58" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNKSt8functionIFvN9webserver9timestampEEEclES1_ (282,828,280 samples, 29.17%)</title><rect x="587.7" y="437" width="344.2" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="590.71" y="447.5" >_ZNKSt8functionIFvN9webserver9timestampEEEclES1_</text>
+</g>
+<g >
+<title>_ZNSt13__atomic_baseIbEaSEb (10,101,010 samples, 1.04%)</title><rect x="993.3" y="437" width="12.3" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="996.33" y="447.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel14enable_readingEv (20,202,020 samples, 2.08%)</title><rect x="391.0" y="309" width="24.6" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="394.04" y="319.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS2_14tcp_connectionEEE_E15_M_init_functorIRKSJ_EEvRSt9_Any_dataOT_ (10,101,010 samples, 1.04%)</title><rect x="612.3" y="277" width="12.3" height="15.0" fill="rgb(211,28,6)" rx="2" ry="2" />
+<text  x="615.29" y="287.5" ></text>
+</g>
+<g >
+<title>_ZSt8_DestroyIPSt8functionIFvvEEEvT_S4_ (10,101,010 samples, 1.04%)</title><rect x="1042.5" y="437" width="12.3" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="1045.50" y="447.5" ></text>
+</g>
+<g >
+<title>_ZStanSt12memory_orderSt23__memory_order_modifier (10,101,010 samples, 1.04%)</title><rect x="477.1" y="373" width="12.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="480.08" y="383.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channelD2Ev (10,101,010 samples, 1.04%)</title><rect x="341.9" y="277" width="12.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="344.88" y="287.5" ></text>
+</g>
+<g >
+<title>_ZNSt5mutex4lockEv (10,101,010 samples, 1.04%)</title><rect x="452.5" y="373" width="12.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="455.50" y="383.5" ></text>
+</g>
+<g >
+<title>_ZSt11make_sharedIN9webserver14tcp_connectionEJRNS0_9eventloopERiRNS0_12inet_addressES6_EESt10shared_ptrIT_EDpOT0_ (111,111,110 samples, 11.46%)</title><rect x="796.7" y="357" width="135.2" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="799.67" y="367.5" >_ZSt11make_shared..</text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS2_14tcp_connectionEEE_E9_M_createIRKSJ_EEvRSt9_Any_dataOT_St17integral_constantIbLb1EE (10,101,010 samples, 1.04%)</title><rect x="612.3" y="261" width="12.3" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="615.29" y="271.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver14tcp_connection4sendERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_E10_M_destroyERSt9_Any_dataSt17integral_constantIbLb0EE (10,101,010 samples, 1.04%)</title><rect x="120.6" y="133" width="12.3" height="15.0" fill="rgb(235,138,33)" rx="2" ry="2" />
+<text  x="123.62" y="143.5" ></text>
+</g>
+<g >
+<title>_ZNSt13unordered_mapImSt10shared_ptrIN9webserver14tcp_connectionEESt4hashImESt8equal_toImESaISt4pairIKmS3_EEE5eraseERS9_ (20,202,020 samples, 2.08%)</title><rect x="59.2" y="149" width="24.6" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="62.17" y="159.5" >_..</text>
+</g>
+<g >
+<title>_ZNK9webserver6buffer4peekEv (10,101,010 samples, 1.04%)</title><rect x="145.2" y="181" width="12.3" height="15.0" fill="rgb(216,54,12)" rx="2" ry="2" />
+<text  x="148.21" y="191.5" ></text>
+</g>
+<g >
+<title>_ZNKSt14_Function_base8_M_emptyEv (10,101,010 samples, 1.04%)</title><rect x="34.6" y="229" width="12.3" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="37.58" y="239.5" ></text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIN9webserver14tcp_connectionEEC2IS1_vEERKSt8weak_ptrIT_E (10,101,010 samples, 1.04%)</title><rect x="427.9" y="293" width="12.3" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="430.92" y="303.5" ></text>
+</g>
+<g >
+<title>_ZNSt10_HashtableIiSt4pairIKiPN9webserver7channelEESaIS5_ENSt8__detail10_Select1stESt8equal_toIiESt4hashIiENS7_18_Mod_range_hashingENS7_20_Default_ranged_hashENS7_20_Prime_rehash_policyENS7_17_Hashtable_traitsILb0ELb0ELb1EEEE5eraseERS1_ (10,101,010 samples, 1.04%)</title><rect x="46.9" y="101" width="12.3" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="49.88" y="111.5" ></text>
+</g>
+<g >
+<title>_ZNKSt14_Function_base8_M_emptyEv (10,101,010 samples, 1.04%)</title><rect x="882.7" y="149" width="12.3" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="885.71" y="159.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver14tcp_connection4sendERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_E10_M_managerERSt9_Any_dataRKSD_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="120.6" y="149" width="12.3" height="15.0" fill="rgb(231,121,29)" rx="2" ry="2" />
+<text  x="123.62" y="159.5" ></text>
+</g>
+<g >
+<title>_ZNSt6atomicIbEaSEb (10,101,010 samples, 1.04%)</title><rect x="477.1" y="405" width="12.3" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="480.08" y="415.5" ></text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx14__alloc_traitsISaISt8functionIFvvEEES3_E10_S_on_swapERS4_S6_ (10,101,010 samples, 1.04%)</title><rect x="1017.9" y="437" width="12.3" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="1020.92" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexEC1ERS0_ (10,101,010 samples, 1.04%)</title><rect x="452.5" y="405" width="12.3" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="455.50" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEEZN11echo_serverC4ERKNS1_12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlS5_E_E10_M_managerERSt9_Any_dataRKSL_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="772.1" y="341" width="12.3" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="775.08" y="351.5" ></text>
+</g>
+<g >
+<title>_ZSt10__invoke_rIvRZN9webserver14tcp_connectionC4ERNS0_9eventloopEiRKNS0_12inet_addressES6_EUlNS0_9timestampEE_JS7_EENSt9enable_ifIX16is_invocable_r_vIT_T0_DpT1_EESB_E4typeEOSC_DpOSD_ (232,323,230 samples, 23.96%)</title><rect x="22.3" y="357" width="282.7" height="15.0" fill="rgb(229,114,27)" rx="2" ry="2" />
+<text  x="25.29" y="367.5" >_ZSt10__invoke_rIvRZN9webserver14tcp_..</text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop17remove_connectionEm (20,202,020 samples, 2.08%)</title><rect x="59.2" y="165" width="24.6" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="62.17" y="175.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver6bufferC2Em (30,303,030 samples, 3.12%)</title><rect x="821.2" y="213" width="36.9" height="15.0" fill="rgb(209,19,4)" rx="2" ry="2" />
+<text  x="824.25" y="223.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZN9webserver6buffer22retrieve_all_as_stringB5cxx11Ev (20,202,020 samples, 2.08%)</title><rect x="132.9" y="213" width="24.6" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="135.92" y="223.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIvEC2IN9webserver14tcp_connectionEvEERKS_IT_E (10,101,010 samples, 1.04%)</title><rect x="415.6" y="309" width="12.3" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="418.62" y="319.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (111,111,110 samples, 11.46%)</title><rect x="169.8" y="293" width="135.2" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="172.79" y="303.5" >__memset_avx2_una..</text>
+</g>
+<g >
+<title>_ZZN9webserver8acceptor6listenEmENKUlNS_9timestampEE_clES1_ (272,727,270 samples, 28.12%)</title><rect x="600.0" y="373" width="331.9" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="603.00" y="383.5" >_ZZN9webserver8acceptor6listenEmENKUlNS_9tim..</text>
+</g>
+<g >
+<title>_ZNSt11unique_lockISt5mutexED2Ev (10,101,010 samples, 1.04%)</title><rect x="464.8" y="405" width="12.3" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="467.79" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt14__shared_countILN9__gnu_cxx12_Lock_policyE2EEC1IN9webserver14tcp_connectionESaIS5_EJRNS4_9eventloopERiRNS4_12inet_addressESB_EEERPT_St20_Sp_alloc_shared_tagIT0_EDpOT1_ (101,010,100 samples, 10.42%)</title><rect x="796.7" y="293" width="122.9" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="799.67" y="303.5" >_ZNSt14__shared..</text>
+</g>
+<g >
+<title>_int_free (20,202,020 samples, 2.08%)</title><rect x="526.2" y="533" width="24.6" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="529.25" y="543.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt23_Sp_counted_ptr_inplaceIN9webserver14tcp_connectionESaIS1_ELN9__gnu_cxx12_Lock_policyE2EE10_M_disposeEv (30,303,030 samples, 3.12%)</title><rect x="329.6" y="341" width="36.9" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="332.58" y="351.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx13new_allocatorINSt8__detail10_Hash_nodeISt4pairIKiPN9webserver7channelEELb0EEEE9constructIS8_JRKSt21piecewise_construct_tSt5tupleIJOiEESF_IJEEEEEvPT_DpOT0_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="181" width="12.3" height="15.0" fill="rgb(249,204,49)" rx="2" ry="2" />
+<text  x="406.33" y="191.5" ></text>
+</g>
+<g >
+<title>_ZNSt12_Vector_baseISt8functionIFvvEESaIS2_EED2Ev (10,101,010 samples, 1.04%)</title><rect x="1030.2" y="437" width="12.3" height="15.0" fill="rgb(209,19,4)" rx="2" ry="2" />
+<text  x="1033.21" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEED2Ev (10,101,010 samples, 1.04%)</title><rect x="120.6" y="197" width="12.3" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="123.62" y="207.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel12handle_eventENS_9timestampE (292,929,290 samples, 30.21%)</title><rect x="10.0" y="421" width="356.5" height="15.0" fill="rgb(215,46,11)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" >_ZN9webserver7channel12handle_eventENS_9timestampE</text>
+</g>
+<g >
+<title>_ZNKSt8weak_ptrIvE4lockEv (10,101,010 samples, 1.04%)</title><rect x="317.3" y="405" width="12.3" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="320.29" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvN9webserver9timestampEEZNS0_8acceptor6listenEmEUlS1_E_E9_M_invokeERKSt9_Any_dataOS1_ (282,828,280 samples, 29.17%)</title><rect x="587.7" y="421" width="344.2" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="590.71" y="431.5" >_ZNSt17_Function_handlerIFvN9webserver9timesta..</text>
+</g>
+<g >
+<title>main (444,444,440 samples, 45.83%)</title><rect x="550.8" y="533" width="540.9" height="15.0" fill="rgb(243,179,42)" rx="2" ry="2" />
+<text  x="553.83" y="543.5" >main</text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS2_14tcp_connectionEEE_E14_M_get_pointerERKSt9_Any_data (10,101,010 samples, 1.04%)</title><rect x="772.1" y="325" width="12.3" height="15.0" fill="rgb(220,72,17)" rx="2" ry="2" />
+<text  x="775.08" y="335.5" ></text>
+</g>
+<g >
+<title>_ZNSt16_Sp_counted_baseILN9__gnu_cxx12_Lock_policyE2EE15_M_add_ref_copyEv (10,101,010 samples, 1.04%)</title><rect x="415.6" y="277" width="12.3" height="15.0" fill="rgb(239,157,37)" rx="2" ry="2" />
+<text  x="418.62" y="287.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connectionD1Ev (30,303,030 samples, 3.12%)</title><rect x="329.6" y="293" width="36.9" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="332.58" y="303.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS2_14tcp_connectionEEPNS2_6bufferENS2_9timestampEE0_E10_M_managerERSt9_Any_dataRKSO_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="784.4" y="325" width="12.3" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="787.38" y="335.5" ></text>
+</g>
+<g >
+<title>_ZZN9webserver9eventloop14add_connectionESt10shared_ptrINS_14tcp_connectionEEENUlvE_D2Ev (10,101,010 samples, 1.04%)</title><rect x="735.2" y="261" width="12.3" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="738.21" y="271.5" ></text>
+</g>
+<g >
+<title>_ZSt13__invoke_implIvRZN9webserver14tcp_connection25connection_close_callbackEvEUlvE_JEET_St14__invoke_otherOT0_DpOT1_ (30,303,030 samples, 3.12%)</title><rect x="46.9" y="197" width="36.9" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="49.88" y="207.5" >_ZS..</text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIN9webserver14tcp_connectionEED2Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="229" width="12.3" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="492.38" y="239.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN11echo_serverC4ERKN9webserver12inet_addressERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlRKSt10shared_ptrINS2_14tcp_connectionEEE_E10_M_managerERSt9_Any_dataRKSL_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="612.3" y="293" width="12.3" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="615.29" y="303.5" ></text>
+</g>
+<g >
+<title>_ZSt13__invoke_implIvZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_JEET_St14__invoke_otherOT0_DpOT1_ (424,242,420 samples, 43.75%)</title><rect x="10.0" y="469" width="516.2" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="13.00" y="479.5" >_ZSt13__invoke_implIvZN9webserver16eventloop_threadC4ESt8functionIFvvE..</text>
+</g>
+<g >
+<title>_ZNSt6vectorIPN9webserver7channelESaIS2_EE9push_backERKS2_ (10,101,010 samples, 1.04%)</title><rect x="378.8" y="405" width="12.2" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="381.75" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt14__shared_countILN9__gnu_cxx12_Lock_policyE2EEC1ERKSt12__weak_countILS1_2EE (10,101,010 samples, 1.04%)</title><rect x="83.8" y="213" width="12.2" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="86.75" y="223.5" ></text>
+</g>
+<g >
+<title>_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE13_S_copy_charsEPcPKcS7_ (10,101,010 samples, 1.04%)</title><rect x="759.8" y="341" width="12.3" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="762.79" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIN9webserver14tcp_connectionEED2Ev (10,101,010 samples, 1.04%)</title><rect x="501.7" y="325" width="12.3" height="15.0" fill="rgb(207,10,2)" rx="2" ry="2" />
+<text  x="504.67" y="335.5" ></text>
+</g>
+<g >
+<title>_ZSt13__invoke_implIvRZN9webserver9eventloop14add_connectionESt10shared_ptrINS0_14tcp_connectionEEEUlvE_JEET_St14__invoke_otherOT0_DpOT1_ (50,505,050 samples, 5.21%)</title><rect x="391.0" y="357" width="61.5" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="394.04" y="367.5" >_ZSt13..</text>
+</g>
+<g >
+<title>_ZNSt6vectorIPN9webserver7channelESaIS2_EE17_M_realloc_insertIJRKS2_EEEvN9__gnu_cxx17__normal_iteratorIPS2_S4_EEDpOT_ (10,101,010 samples, 1.04%)</title><rect x="968.8" y="437" width="12.2" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="971.75" y="447.5" ></text>
+</g>
+<g >
+<title>_ZNSt11_Tuple_implILm0EJOiEE7_M_headERS1_ (10,101,010 samples, 1.04%)</title><rect x="403.3" y="101" width="12.3" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="406.33" y="111.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_baseD1Ev (20,202,020 samples, 2.08%)</title><rect x="722.9" y="325" width="24.6" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="725.92" y="335.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt6vectorIPN9webserver7channelESaIS2_EE5beginEv (10,101,010 samples, 1.04%)</title><rect x="968.8" y="421" width="12.2" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="971.75" y="431.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.constprop.0 (10,101,010 samples, 1.04%)</title><rect x="1177.7" y="549" width="12.3" height="15.0" fill="rgb(222,80,19)" rx="2" ry="2" />
+<text  x="1180.71" y="559.5" ></text>
+</g>
+<g >
+<title>_ZNSt4pairIKiPN9webserver7channelEEC1IJOiEJEEESt21piecewise_construct_tSt5tupleIJDpT_EES8_IJDpT0_EE (10,101,010 samples, 1.04%)</title><rect x="403.3" y="165" width="12.3" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="406.33" y="175.5" ></text>
+</g>
+<g >
+<title>_ZNSt6vectorIcSaIcEEC2EmRKS0_ (30,303,030 samples, 3.12%)</title><rect x="821.2" y="197" width="36.9" height="15.0" fill="rgb(216,54,13)" rx="2" ry="2" />
+<text  x="824.25" y="207.5" >_ZN..</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvRKSt10shared_ptrIN9webserver14tcp_connectionEEEEC2ERKS7_ (10,101,010 samples, 1.04%)</title><rect x="772.1" y="357" width="12.3" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="775.08" y="367.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver9eventloop11run_in_loopESt8functionIFvvEE (40,404,040 samples, 4.17%)</title><rect x="34.6" y="261" width="49.2" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="37.58" y="271.5" >_ZN9..</text>
+</g>
+<g >
+<title>_ZN9webserver14tcp_connection18destroy_connectionEv (10,101,010 samples, 1.04%)</title><rect x="46.9" y="165" width="12.3" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="49.88" y="175.5" ></text>
+</g>
+<g >
+<title>[libstdc++.so.6.0.30] (10,101,010 samples, 1.04%)</title><rect x="722.9" y="277" width="12.3" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="725.92" y="287.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7epoller4pollEiRSt6vectorIPNS_7channelESaIS3_EE (40,404,040 samples, 4.17%)</title><rect x="931.9" y="469" width="49.1" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="934.88" y="479.5" >_ZN9..</text>
+</g>
+<g >
+<title>_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC1IS3_EEPKcRKS3_ (20,202,020 samples, 2.08%)</title><rect x="747.5" y="357" width="24.6" height="15.0" fill="rgb(218,60,14)" rx="2" ry="2" />
+<text  x="750.50" y="367.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt10shared_ptrIN9webserver14tcp_connectionEEC2ISaIS1_EJRNS0_9eventloopERiRNS0_12inet_addressES9_EEESt20_Sp_alloc_shared_tagIT_EDpOT0_ (101,010,100 samples, 10.42%)</title><rect x="796.7" y="325" width="122.9" height="15.0" fill="rgb(254,225,53)" rx="2" ry="2" />
+<text  x="799.67" y="335.5" >_ZNSt10shared_p..</text>
+</g>
+<g >
+<title>_ZNSt8__detail16_Hashtable_allocISaINS_10_Hash_nodeISt4pairIKmSt10shared_ptrIN9webserver14tcp_connectionEEELb0EEEEE18_M_deallocate_nodeEPS9_ (10,101,010 samples, 1.04%)</title><rect x="71.5" y="85" width="12.3" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="74.46" y="95.5" ></text>
+</g>
+<g >
+<title>_ZN9__gnu_cxx13new_allocatorIPN9webserver7channelEE10deallocateEPS3_m (10,101,010 samples, 1.04%)</title><rect x="1054.8" y="421" width="12.3" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="1057.79" y="431.5" ></text>
+</g>
+<g >
+<title>_ZNKSt8functionIFvN9webserver9timestampEEEclES1_ (232,323,230 samples, 23.96%)</title><rect x="22.3" y="389" width="282.7" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="25.29" y="399.5" >_ZNKSt8functionIFvN9webserver9timesta..</text>
+</g>
+<g >
+<title>_ZNSt6thread8_InvokerISt5tupleIJZN9webserver16eventloop_threadC4ESt8functionIFvvEERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEEUlvE_EEE9_M_invokeIJLm0EEEEvSt12_Index_tupleIJXspT_EEE (424,242,420 samples, 43.75%)</title><rect x="10.0" y="501" width="516.2" height="15.0" fill="rgb(241,165,39)" rx="2" ry="2" />
+<text  x="13.00" y="511.5" >_ZNSt6thread8_InvokerISt5tupleIJZN9webserver16eventloop_threadC4ESt8fu..</text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEED2Ev (10,101,010 samples, 1.04%)</title><rect x="858.1" y="197" width="12.3" height="15.0" fill="rgb(237,148,35)" rx="2" ry="2" />
+<text  x="861.12" y="207.5" ></text>
+</g>
+<g >
+<title>_ZSt7forwardIRKSt4pairIKiPN9webserver7channelEEEOT_RNSt16remove_referenceIS8_E4typeE (10,101,010 samples, 1.04%)</title><rect x="46.9" y="37" width="12.3" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="49.88" y="47.5" ></text>
+</g>
+<g >
+<title>_ZNSt10__weak_ptrIvLN9__gnu_cxx12_Lock_policyE2EED2Ev (10,101,010 samples, 1.04%)</title><rect x="341.9" y="245" width="12.3" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="344.88" y="255.5" ></text>
+</g>
+<g >
+<title>_ZNSt17_Function_handlerIFvvEZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_managerERSt9_Any_dataRKS8_St18_Manager_operation (10,101,010 samples, 1.04%)</title><rect x="489.4" y="293" width="12.3" height="15.0" fill="rgb(241,168,40)" rx="2" ry="2" />
+<text  x="492.38" y="303.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_baseD1Ev (10,101,010 samples, 1.04%)</title><rect x="489.4" y="309" width="12.3" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="492.38" y="319.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7epoller14remove_channelERNS_7channelE (10,101,010 samples, 1.04%)</title><rect x="46.9" y="133" width="12.3" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="49.88" y="143.5" ></text>
+</g>
+<g >
+<title>_ZNSt13__atomic_baseIbEaSEb (10,101,010 samples, 1.04%)</title><rect x="514.0" y="405" width="12.2" height="15.0" fill="rgb(230,115,27)" rx="2" ry="2" />
+<text  x="516.96" y="415.5" ></text>
+</g>
+<g >
+<title>_ZNSt8functionIFvvEEaSEOS1_ (20,202,020 samples, 2.08%)</title><rect x="870.4" y="197" width="24.6" height="15.0" fill="rgb(222,79,18)" rx="2" ry="2" />
+<text  x="873.42" y="207.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver7channel6removeEv (10,101,010 samples, 1.04%)</title><rect x="46.9" y="149" width="12.3" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="49.88" y="159.5" ></text>
+</g>
+<g >
+<title>__strlen_avx2 (10,101,010 samples, 1.04%)</title><rect x="366.5" y="389" width="12.3" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="369.46" y="399.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver7channel23handle_event_with_guardENS_9timestampE (303,030,300 samples, 31.25%)</title><rect x="563.1" y="453" width="368.8" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="566.12" y="463.5" >_ZN9webserver7channel23handle_event_with_guardENS_..</text>
+</g>
+<g >
+<title>_ZSt11__addressofIcEPT_RS0_ (10,101,010 samples, 1.04%)</title><rect x="845.8" y="117" width="12.3" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="848.83" y="127.5" ></text>
+</g>
+<g >
+<title>_ZSt7forwardIRN9webserver9eventloopEEOT_RNSt16remove_referenceIS3_E4typeE (10,101,010 samples, 1.04%)</title><rect x="919.6" y="341" width="12.3" height="15.0" fill="rgb(218,62,14)" rx="2" ry="2" />
+<text  x="922.58" y="351.5" ></text>
+</g>
+<g >
+<title>_ZNSt14_Function_base13_Base_managerIZN9webserver9eventloop14add_connectionESt10shared_ptrINS1_14tcp_connectionEEEUlvE_E10_M_destroyERSt9_Any_dataSt17integral_constantIbLb0EE (10,101,010 samples, 1.04%)</title><rect x="489.4" y="261" width="12.3" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="492.38" y="271.5" ></text>
+</g>
+<g >
+<title>_ZN9webserver9timestamp3nowEv (20,202,020 samples, 2.08%)</title><rect x="944.2" y="453" width="24.6" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="947.17" y="463.5" >_..</text>
+</g>
+<g >
+<title>_ZNSt5mutex6unlockEv (20,202,020 samples, 2.08%)</title><rect x="686.0" y="277" width="24.6" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="689.04" y="287.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver6buffer18retrieve_as_stringB5cxx11Em (20,202,020 samples, 2.08%)</title><rect x="132.9" y="197" width="24.6" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="135.92" y="207.5" >_..</text>
+</g>
+<g >
+<title>_ZN9webserver7epoller14update_channelEiRNS_7channelE (10,101,010 samples, 1.04%)</title><rect x="96.0" y="229" width="12.3" height="15.0" fill="rgb(229,114,27)" rx="2" ry="2" />
+<text  x="99.04" y="239.5" ></text>
+</g>
+</g>
+</svg>
