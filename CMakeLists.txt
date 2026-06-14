@@ -28,7 +28,7 @@ else()
 endif()
 
 # ===================== 源码 & 目标 =====================
-set(WEBSERVER_SRCS
+set(SRCS
     acceptor.cpp
     channel.cpp
     epoller.cpp
@@ -41,10 +41,11 @@ set(WEBSERVER_SRCS
     timestamp.cpp
 )
 
-add_library(webserver_lib STATIC ${WEBSERVER_SRCS})
+add_library(h_net_lib STATIC ${SRCS})
+target_include_directories(h_net_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_executable(echo_server example/echo_server.cpp)
 add_executable(echo_client example/echo_client.cpp)
 
-target_include_directories(echo_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(echo_server webserver_lib pthread)
+target_link_libraries(echo_server PRIVATE h_net_lib pthread)
+target_link_libraries(echo_client PRIVATE h_net_lib pthread)
