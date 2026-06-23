@@ -118,10 +118,12 @@ void tcp_connection::establish_connection() {
   channel_.tie(p);
   channel_.enable_reading();  // 需要在subloop中执行，否则mainloop和subloop
                               // 同时操作epoller会有并发问题
+  // connection_callback_中可能会检查state_状态
+  state_ = state::CONNECTED;
   if (connection_callback_) {
     connection_callback_(p);
   }
-  state_ = state::CONNECTED;
+  
   logger::debug("connection set state to connected");
 }
 
